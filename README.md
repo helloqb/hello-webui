@@ -26,19 +26,20 @@ gh run watch --repo helloqb/hello-webui
 
 ## 迷你主机部署
 
-在装有 Docker Engine 和 Compose 插件的 Linux 主机上，将 [deploy/compose.yaml](deploy/compose.yaml) 放到 `/srv/hello-webui/compose.yaml`。Compose 启动 `webui` 和 `cloudflared`，将 SQLite、附件、配置及缓存写入 `hello-webui-data` 数据卷。WebUI 通过 Compose 网络接受 Tunnel 转发，路由器可以保持入站端口关闭。 [Compose 网络说明](https://docs.docker.com/compose/how-tos/networking/)
+在装有 Docker Engine 和 Compose 插件的 Linux 主机上，将 [deploy/compose.yaml](deploy/compose.yaml) 放到 `/srv/hello-webui/compose.yaml`。Compose 启动 `webui`，将 SQLite、附件、配置及缓存写入 `hello-webui-data` 数据卷。默认端口为 `127.0.0.1:3000`，可从迷你主机本地访问。 [Docker 端口发布](https://docs.docker.com/engine/network/port-publishing/)
 
-在同目录创建权限为 `600` 的 `.env`，按实际值填写。新实例可用 `openssl rand -hex 32` 生成 `WEBUI_SECRET_KEY`，以后保留同一个值。迁移已有实例时沿用该实例的密钥。Tunnel Token 与 Open WebUI 密钥只存放在主机部署目录和受控备份中。
+在同目录创建权限为 `600` 的 `.env`，按实际值填写。新实例可用 `openssl rand -hex 32` 生成 `WEBUI_SECRET_KEY`，以后保留同一个值。迁移已有实例时沿用该实例的密钥。
 
 ```dotenv
 WEBUI_IMAGE=ghcr.io/helloqb/hello-webui:native-0.13.4.1
-CLOUDFLARED_IMAGE=cloudflare/cloudflared:2026.11.1
-WEBUI_URL=https://chat.example.com
 WEBUI_SECRET_KEY=<实例密钥>
-TUNNEL_TOKEN=<远程管理的 Tunnel Token>
+WEBUI_BIND_ADDRESS=127.0.0.1
+WEBUI_PORT=3000
+WEBUI_URL=http://127.0.0.1:3000
+WEBUI_COOKIE_SECURE=false
 ```
 
-在 Cloudflare 为 `chat.example.com` 建立 Access 应用和允许名单，再配置远程管理的 Tunnel 路由，将该域名指向 `http://webui:8080`。启用 **Protect with Access** 并确认域名支持 WebSocket。将域名填入 `WEBUI_URL`，Compose 会用它设置浏览器访问来源。已有数据库上的 WebUI URL 可以在管理员设置中更新。 [Cloudflare Access 配置](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/) · [Tunnel 参数](https://developers.cloudflare.com/tunnel/reference/run-parameters/#token) · [Open WebUI 配置](https://docs.openwebui.com/reference/env-configuration/#webui_url)
+接入你选用的访问方式时，将 `WEBUI_URL` 设为浏览器实际访问的地址。Compose 会用这个值配置允许的浏览器来源。若入口使用 HTTPS，同时设 `WEBUI_COOKIE_SECURE=true`。需要让其他设备直接连接主机时，可将 `WEBUI_BIND_ADDRESS` 设为主机的局域网 IP。已有数据库上的 WebUI URL 可以在管理员设置中更新。 [Open WebUI 配置](https://docs.openwebui.com/reference/env-configuration/#webui_url)
 
 如果 GHCR 包为私有，先在迷你主机用具有 `read:packages` 权限的个人访问令牌登录 GHCR。运行 `docker login ghcr.io --username helloqb` 后，在密码提示处输入令牌。 [GHCR 身份验证](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-to-the-container-registry)
 
@@ -50,7 +51,7 @@ docker compose up -d --wait
 docker compose ps
 ```
 
-通过配置好的 HTTPS 域名进入 WebUI。首次创建管理员后，在「管理员面板 → 设置 → 连接」添加 **DeepSeek 原生**，填入 DeepSeek API Key。根据需要配置模型访问权限。用外网验证登录、联网搜索、流式回答、停止生成、附件和重开会话。若要迁移开发机数据，先用数据副本检查附件路径，旧文件记录可能引用开发机的绝对路径。 [DeepSeek 原生配置与验收](docs/deepseek-native.md)
+通过配置好的地址进入 WebUI。首次创建管理员后，在「管理员面板 → 设置 → 连接」添加 **DeepSeek 原生**，填入 DeepSeek API Key。根据需要配置模型访问权限。接入选定的访问方式后，验证登录、联网搜索、流式回答、停止生成、附件和重开会话。若要迁移开发机数据，先用数据副本检查附件路径，旧文件记录可能引用开发机的绝对路径。 [DeepSeek 原生配置与验收](docs/deepseek-native.md)
 
 ## 同步上游、升级与回滚
 
