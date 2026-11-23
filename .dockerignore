@@ -7,6 +7,8 @@ node_modules
 /package
 .env
 .env.*
+**/.webui_secret_key
+/deploy
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 __pycache__

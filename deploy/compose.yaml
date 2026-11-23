@@ -1,0 +1,27 @@
+name: hello-webui
+
+services:
+  webui:
+    image: ${WEBUI_IMAGE:?Set WEBUI_IMAGE in .env}
+    restart: unless-stopped
+    environment:
+      WEBUI_URL: ${WEBUI_URL:?Set WEBUI_URL in .env}
+      CORS_ALLOW_ORIGIN: ${WEBUI_URL:?Set WEBUI_URL in .env}
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:?Set WEBUI_SECRET_KEY in .env}
+      WEBUI_AUTH_COOKIE_SECURE: 'true'
+      WEBUI_SESSION_COOKIE_SECURE: 'true'
+      ENABLE_OLLAMA_API: 'false'
+      ENABLE_SIGNUP: 'false'
+    volumes:
+      - webui-data:/app/backend/data
+
+  cloudflared:
+    image: ${CLOUDFLARED_IMAGE:?Set CLOUDFLARED_IMAGE in .env}
+    command: [tunnel, --no-autoupdate, run]
+    restart: unless-stopped
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?Set TUNNEL_TOKEN in .env}
+
+volumes:
+  webui-data:
+    name: ${WEBUI_DATA_VOLUME:-hello-webui-data}
