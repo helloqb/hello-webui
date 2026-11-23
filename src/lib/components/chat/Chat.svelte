@@ -383,7 +383,9 @@
 		}
 	}
 
-	$: contextCompactionEnabled = Boolean($config?.features?.enable_context_compaction);
+	$: contextCompactionEnabled =
+		Boolean($config?.features?.enable_context_compaction) &&
+		$models.find((model) => model.id === selectedModelIds[0])?.provider !== 'deepseek_native';
 
 	const getContextThreshold = (
 		modelId: string | undefined,
@@ -480,6 +482,12 @@
 	let pendingWebSearchPrompt: string | null = null;
 	let webSearchConfirmed = false;
 
+	$: deepseekNativeOnly =
+		selectedModelIds.length > 0 &&
+		selectedModelIds.every(
+			(id) => $models.find((model) => model.id === id)?.provider === 'deepseek_native'
+		);
+
 	// Before webSearchActive, so it sees the new defaults in the same update
 	$: if (!loading && modelDefaults && !equal(selectedModelIds, defaultsModelIds)) {
 		setDefaults(true);
@@ -493,6 +501,7 @@
 			).length === currentModels.length;
 
 		webSearchActive = Boolean(
+			!deepseekNativeOnly &&
 			$config?.features?.enable_web_search &&
 			($user?.role === 'admin' || $user?.permissions?.features?.web_search) &&
 			(webSearchEnabled ||
@@ -665,7 +674,7 @@
 		messageInput?.focus({ preventScroll: true });
 	};
 
-	let params = {};
+	let params: Record<string, any> = {};
 	let chatVariables = {};
 	let showChatVariablesModal = false;
 	let loadedChatIdProp = '';
@@ -2456,7 +2465,12 @@
 
 			// Upload file to server
 			console.log('Uploading file to server...');
-			const uploadedFile = await uploadFile(localStorage.token, file, metadata);
+			const uploadedFile = await uploadFile(
+				localStorage.token,
+				file,
+				metadata,
+				!deepseekNativeOnly
+			);
 
 			if (!uploadedFile) {
 				throw new Error('Server returned null response for file upload');
@@ -2495,6 +2509,15 @@
 
 		if (!Array.isArray(urls)) {
 			urls = [urls];
+		}
+
+		if (deepseekNativeOnly) {
+			// An explicit URL attachment becomes part of the next native message.
+			prompt = [prompt, ...urls].filter(Boolean).join('\n');
+			messageInput?.setText(prompt);
+			params = { ...params, deepseek_search: true };
+			await saveParam('deepseek_search', true);
+			return;
 		}
 
 		// Create file items first
@@ -3171,7 +3194,11 @@
 		pendingUrlActions = urls.length || call ? { urls, call } : null;
 
 		if (searchParams.get('web-search') === 'true') {
-			webSearchEnabled = true;
+			if (deepseekNativeOnly) {
+				params = { ...params, deepseek_search: true };
+			} else {
+				webSearchEnabled = true;
+			}
 		}
 
 		if (searchParams.get('image-generation') === 'true') {
@@ -4915,10 +4942,10 @@
 		};
 	};
 
-	const getFeatures = () => {
-		let features = {};
+	const getFeatures = (hasNativeModel: boolean, nativeOnly: boolean) => {
+		let features: Record<string, unknown> = {};
 
-		if ($config?.features)
+		if ($config?.features && !nativeOnly)
 			features = {
 				voice: ($voiceCall && callMode === 'current') || !!bridge?.connected,
 				// A picked image model rides on the flag; plain true leaves the choice to the server.
@@ -4948,6 +4975,11 @@
 
 		if ($settings?.memory ?? $config?.features?.enable_memories ?? false) {
 			features = { ...features, memory: true };
+		}
+
+		if (hasNativeModel) {
+			features.deepseek_search = params.deepseek_search === true;
+			features.deepseek_thinking = params.deepseek_thinking === true;
 		}
 
 		return features;
@@ -4988,6 +5020,12 @@
 	) => {
 		const responseMessage = _history.messages[responseMessageId];
 		const userMessage = _history.messages[responseMessage.parentId];
+		const requestModelIds = messageIdsList?.map(({ model_id }) => model_id) ?? [model.id];
+		const nativeRequestModels = requestModelIds.filter(
+			(id) => $models.find((candidate) => candidate.id === id)?.provider === 'deepseek_native'
+		);
+		const hasNativeModel = nativeRequestModels.length > 0;
+		const nativeOnly = nativeRequestModels.length === requestModelIds.length;
 		const filesystemAttachment = userMessage?.files?.find(
 			(file: any) => file.type === 'filesystem'
 		);
@@ -5070,6 +5108,7 @@
 						return {
 							role: message.role,
 							model: message.model,
+							content: undefined,
 							output: message.output,
 							meta: message.meta
 						};
@@ -5079,6 +5118,7 @@
 						return {
 							id: message.id,
 							role: message.role,
+							...(hasNativeModel ? { files: message.files } : {}),
 							contextSummary: message?.contextSummary,
 							content: [
 								{
@@ -5098,6 +5138,7 @@
 					return {
 						id: message.id,
 						role: message.role,
+						...(hasNativeModel && message.role === 'user' ? { files: message.files } : {}),
 						contextSummary: message?.contextSummary,
 						content: message?.merged?.content ?? message.content,
 						model: message.model,
@@ -5118,8 +5159,13 @@
 
 		// Only send terminal_id if the model has terminal capability enabled
 		const terminalEnabled =
-			$config?.features?.enable_tool_servers && (model.info?.meta?.capabilities?.terminal ?? true);
+			!nativeOnly &&
+			$config?.features?.enable_tool_servers &&
+			(model.info?.meta?.capabilities?.terminal ?? true);
 		const useChatVariablesFallback = !_chatId || $temporaryChat || isTemporaryChatId(_chatId);
+		const generationParams = { ...params };
+		delete generationParams.deepseek_search;
+		delete generationParams.deepseek_thinking;
 
 		const res = await generateOpenAIChatCompletion(
 			localStorage.token,
@@ -5129,7 +5175,9 @@
 				...(messages.length > 0 ? { messages } : {}),
 				params: {
 					...$settings?.params,
-					...Object.fromEntries(Object.entries(params).filter(([, value]) => value !== null)),
+					...Object.fromEntries(
+						Object.entries(generationParams).filter(([, value]) => value !== null)
+					),
 					model_controls: $settings?.params?.model_controls ?? {},
 					stop: getStopTokens()
 				},
@@ -5141,18 +5189,20 @@
 						: undefined,
 
 				filter_ids:
-					$config?.features?.enable_functions && selectedFilterIds.length > 0
+					!nativeOnly && $config?.features?.enable_functions && selectedFilterIds.length > 0
 						? selectedFilterIds
 						: undefined,
-				tool_ids: toolIds.filter((id) =>
-					id.startsWith('server:')
-						? $config?.features?.enable_tool_servers
-						: $config?.features?.enable_tools
-				),
-				skill_ids: skillIds.length > 0 ? skillIds : undefined,
+				tool_ids: nativeOnly
+					? []
+					: toolIds.filter((id) =>
+							id.startsWith('server:')
+								? $config?.features?.enable_tool_servers
+								: $config?.features?.enable_tools
+						),
+				skill_ids: !nativeOnly && skillIds.length > 0 ? skillIds : undefined,
 				terminal_id: terminalEnabled && requestTerminalId ? requestTerminalId : null,
 				terminal_cwd: !_chatId ? requestTerminalCwd : undefined,
-				features: getFeatures(),
+				features: getFeatures(hasNativeModel, nativeOnly),
 				variables: {
 					...getPromptVariables(
 						$user?.name,
@@ -5185,11 +5235,11 @@
 							createMessagesList(_history, responseMessageId).length === 2) ||
 						(branchPointMessageId && userMessage?.parentId === branchPointMessageId))
 						? {
-								title_generation: $settings?.title?.auto ?? true,
-								tags_generation: $settings?.autoTags ?? true
+								title_generation: !nativeOnly && ($settings?.title?.auto ?? true),
+								tags_generation: !nativeOnly && ($settings?.autoTags ?? true)
 							}
 						: {}),
-					follow_up_generation: $settings?.autoFollowUps ?? true
+					follow_up_generation: !nativeOnly && ($settings?.autoFollowUps ?? true)
 				}
 			},
 			`${WEBUI_BASE_URL}/api`

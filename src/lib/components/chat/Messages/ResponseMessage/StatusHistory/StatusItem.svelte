@@ -1,11 +1,20 @@
-<script>
+<script lang="ts">
 	import { getContext } from 'svelte';
-	const i18n = getContext('i18n');
+	const i18n = getContext<any>('i18n');
 	import WebSearchResults from '../WebSearchResults.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
-	import { t } from 'i18next';
 
-	export let status = null;
+	export let status: {
+		action?: string;
+		description?: string;
+		done?: boolean;
+		hidden?: boolean;
+		query?: string;
+		queries?: string[];
+		urls?: string[];
+		items?: { link: string; title?: string }[];
+		count?: number;
+	} | null = null;
 	export let done = false;
 	export let clamp = true;
 </script>
@@ -25,7 +34,7 @@
 						<!-- $i18n.t('Searched {{count}} sites') -->
 						{#if status?.description?.includes('{{count}}')}
 							{$i18n.t(status?.description, {
-								count: (status?.urls || status?.items).length
+								count: (status.urls || status.items)?.length ?? 0
 							})}
 						{:else if status?.description === 'No search query generated'}
 							{$i18n.t('No search query generated')}
@@ -142,6 +151,14 @@
 						{$i18n.t('Generating search query')}
 					{:else if status?.description === 'Searching the web'}
 						{$i18n.t('Searching the web')}
+					{:else if status?.description === 'Reading a web page'}
+						{$i18n.t('Reading a web page')}
+					{:else if status?.description === 'Web search completed'}
+						{$i18n.t('Web search completed')}
+					{:else if status?.description === 'Web page read'}
+						{$i18n.t('Web page read')}
+					{:else if status?.description === 'DeepSeek web tool failed'}
+						{$i18n.t('DeepSeek web tool failed')}
 					{:else}
 						{status?.description}
 					{/if}

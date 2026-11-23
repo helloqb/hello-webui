@@ -249,6 +249,7 @@ type BaseModel = {
 	name: string;
 	info?: ModelConfig;
 	owned_by: 'ollama' | 'openai' | 'arena' | 'terminal';
+	provider?: string;
 };
 
 export interface OpenAIModel extends BaseModel {

@@ -195,6 +195,11 @@
 
 	let selectedModelIds = [];
 	$: selectedModelIds = atSelectedModel !== undefined ? [atSelectedModel.id] : selectedModels;
+	$: deepseekNativeModels = selectedModelIds.filter(
+		(id) => $models.find((model) => model.id === id)?.provider === 'deepseek_native'
+	);
+	$: deepseekNativeOnly =
+		deepseekNativeModels.length > 0 && deepseekNativeModels.length === selectedModelIds.length;
 	$: hasChatVariables = selectedModelIds.some(
 		(modelId) =>
 			($models.find((model) => model.id === modelId)?.info?.meta?.chat_variables_schema?.fields
@@ -897,7 +902,7 @@
 
 	let fileUploadEnabled: boolean = true;
 	$: fileUploadEnabled =
-		(getFilesystemUploadTerminal($selectedTerminalId, $terminalServers) ||
+		((!deepseekNativeOnly && getFilesystemUploadTerminal($selectedTerminalId, $terminalServers)) ||
 			fileUploadCapableModels.length === selectedModelIds.length) &&
 		($_user?.role === 'admin' || $_user?.permissions?.chat?.file_upload);
 
@@ -940,6 +945,7 @@
 			.then((rows) => (canCreateTerminal = rows.length > 0))
 			.catch(() => (canCreateTerminal = false));
 	$: showTerminalSelector =
+		!deepseekNativeOnly &&
 		$config?.features?.enable_tool_servers &&
 		(($terminalServers ?? []).some((t) => t.id) || canCreateTerminal);
 
@@ -955,7 +961,7 @@
 		.map((id) => ($models.find((model) => model.id === id) || {})?.filters ?? [])
 		.reduce((acc, filters) => acc.filter((f1) => filters.some((f2) => f2.id === f1.id)));
 
-	$: showInputSelections = $settings?.showInputSelections ?? false;
+	$: showInputSelections = !deepseekNativeOnly && ($settings?.showInputSelections ?? false);
 
 	let showToolsButton = false;
 	$: showToolsButton = ($tools ?? []).length > 0;
@@ -1067,7 +1073,7 @@
 		selectedId = $selectedTerminalId,
 		servers: any[] | null = $terminalServers
 	) => {
-		if (!selectedId) return null;
+		if (deepseekNativeOnly || !selectedId) return null;
 		return (
 			(servers ?? []).find(
 				(t: any) => t.id && t.id === selectedId && t.config?.chat_uploads === 'filesystem'
@@ -1207,8 +1213,12 @@
 					};
 				}
 
-				// During the file upload, file content is automatically extracted.
-				const uploadedFile = await uploadFile(localStorage.token, file, metadata, process);
+				const uploadedFile = await uploadFile(
+					localStorage.token,
+					file,
+					metadata,
+					process && !deepseekNativeOnly
+				);
 
 				if (uploadedFile) {
 					console.log('File upload completed:', {
@@ -2370,7 +2380,7 @@
 												size={file?.size}
 												loading={file.status === 'uploading'}
 												dismissible={true}
-												edit={true}
+												edit={!deepseekNativeOnly}
 												small={true}
 												modal={['file', 'collection'].includes(file?.type)}
 												on:dismiss={async () => {
@@ -2605,10 +2615,9 @@
 										{chatId}
 										bind:files
 										selectedModels={selectedModelIds}
-										fileUploadCapableModels={getFilesystemUploadTerminal(
-											$selectedTerminalId,
-											$terminalServers
-										)
+										{deepseekNativeOnly}
+										fileUploadCapableModels={!deepseekNativeOnly &&
+										getFilesystemUploadTerminal($selectedTerminalId, $terminalServers)
 											? selectedModelIds
 											: fileUploadCapableModels}
 										{visionCapableModels}
@@ -2692,7 +2701,7 @@
 
 										<!-- Retired menu label: keep its translation. {$i18n.t('Integrations')} -->
 										<svelte:fragment slot="integrations">
-											{#if showWebSearchButton || showImageGenerationButton || showVideoGenerationButton || showCodeInterpreterButton || showToolsButton || showSkillsButton || (toggleFilters && toggleFilters.length > 0)}
+											{#if !deepseekNativeOnly && (showWebSearchButton || showImageGenerationButton || showVideoGenerationButton || showCodeInterpreterButton || showToolsButton || showSkillsButton || (toggleFilters && toggleFilters.length > 0))}
 												<IntegrationsMenu
 													{selectedTerminalId}
 													{terminalSkills}
@@ -2757,7 +2766,7 @@
 									use:fitControlLabels
 									class="flex flex-1 items-center min-w-0 overflow-x-auto scrollbar-none"
 								>
-									{#if selectedModelIds.length === 1 && $models.find((m) => m.id === selectedModelIds[0])?.has_user_valves && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.valves ?? true))}
+									{#if !deepseekNativeOnly && selectedModelIds.length === 1 && $models.find((m) => m.id === selectedModelIds[0])?.has_user_valves && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.valves ?? true))}
 										<div class="ml-1 flex gap-1.5 shrink-0">
 											<Tooltip content={$i18n.t('Valves')} placement="top">
 												<button
@@ -2778,6 +2787,33 @@
 									{/if}
 
 									<div class="ml-1 flex gap-1.5 shrink-0">
+										{#if deepseekNativeModels.length > 0}
+											{#each [{ key: 'deepseek_search', label: $i18n.t('DeepSeek Web Search'), icon: GlobeAlt }, { key: 'deepseek_thinking', label: $i18n.t('Deep Thinking'), icon: Sparkles }] as feature (feature.key)}
+												{@const enabled = params[feature.key] === true}
+												<Tooltip content={feature.label} placement="top">
+													<button
+														type="button"
+														aria-label={feature.label}
+														aria-pressed={enabled}
+														class="focus-ring flex h-[1.875rem] shrink-0 items-center gap-1.5 rounded-full px-2 text-xs transition-colors {enabled
+															? 'bg-sky-50 text-sky-700 dark:bg-sky-400/10 dark:text-sky-300'
+															: 'text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800'}"
+														on:click={() => {
+															params = { ...params, [feature.key]: !enabled };
+															onParamChange(feature.key, !enabled);
+														}}
+													>
+														<svelte:component
+															this={feature.icon}
+															className="size-4"
+															strokeWidth="1.75"
+														/>
+														<span data-input-label>{feature.label}</span>
+													</button>
+												</Tooltip>
+											{/each}
+										{/if}
+
 										{#if showInputSelections && (selectedToolIds ?? []).length > 0 && $visibleControls['chat.selected_tools']}
 											<Tooltip
 												content={$i18n.t('{{COUNT}} Available Tools', {
@@ -2990,7 +3026,7 @@
 											</div>
 										{/if}
 
-										{#each pendingOAuthTools as pendingTool (pendingTool.id)}
+										{#each deepseekNativeOnly ? [] : pendingOAuthTools as pendingTool (pendingTool.id)}
 											<Tooltip content={$i18n.t('Click to connect')} placement="top">
 												<button
 													aria-label={`${$i18n.t('Click to connect')}: ${pendingTool.name}`}

@@ -79,6 +79,7 @@
 			});
 
 			if (res) {
+				OPENAI_API_KEYS = res.OPENAI_API_KEYS;
 				toast.success($i18n.t('OpenAI API settings updated'));
 				await models.set(await getModels());
 			}

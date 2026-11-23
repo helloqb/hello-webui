@@ -206,6 +206,9 @@
 		? resolveLocalizedModelName(model, $i18n.language)
 		: message.modelName || message.model;
 	$: model = $models.find((m) => m.id === message.model);
+	$: isDeepSeekNative =
+		model?.provider === 'deepseek_native' ||
+		message.output?.some((item) => item.type === 'open_webui:deepseek_native');
 	$: responseTimestamp = message?.meta?.response_ended_at ?? message?.timestamp;
 
 	$: statusEntries = message?.statusHistory ?? [...(message?.status ? [message?.status] : [])];
@@ -1447,7 +1450,7 @@
 										</Tooltip>
 									{/if}
 
-									{#if canBranch && isLastMessage && ($user?.role === 'admin' || ($user?.permissions?.chat?.continue_response ?? true))}
+									{#if canBranch && isLastMessage && !isDeepSeekNative && ($user?.role === 'admin' || ($user?.permissions?.chat?.continue_response ?? true))}
 										<Tooltip content={$i18n.t('Continue Response')} placement="bottom">
 											<button
 												aria-label={$i18n.t('Continue Response')}

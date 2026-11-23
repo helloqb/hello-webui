@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import logging
 import re
 import time
@@ -30,6 +31,7 @@ from open_webui.env import (
     ENABLE_OPENAI_API_PASSTHROUGH,
     MODELS_CACHE_TTL,
     REDIS_KEY_PREFIX,
+    WEBUI_SECRET_KEY,
 )
 from open_webui.events import EVENTS, publish_event, publish_model_provider_request_failed
 from open_webui.internal.db import get_async_session
@@ -37,8 +39,8 @@ from open_webui.models.access_grants import AccessGrants
 from open_webui.models.config import Config
 from open_webui.models.groups import Groups
 from open_webui.models.models import Models
-from open_webui.utils.tether import RelayClient, get_tether_connections
 from open_webui.models.users import UserModel
+from open_webui.utils import deepseek_native
 from open_webui.utils.access_control import check_model_access, has_connection_access, has_permission
 from open_webui.utils.anthropic import ANTHROPIC_VERSION, get_anthropic_models, is_anthropic_url
 from open_webui.utils.auth import get_admin_user, get_verified_user
@@ -57,6 +59,7 @@ from open_webui.utils.session_pool import (
     get_session,
     stream_wrapper,
 )
+from open_webui.utils.tether import RelayClient, get_tether_connections
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,6 +79,7 @@ _STRIP_PROXY_HEADERS = frozenset({'content-encoding', 'content-length', 'transfe
 _MODEL_LIST_TIMEOUT = aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST)
 _UNSUPPORTED_OPENAI_MODEL_KEYWORDS = ('babbage', 'dall-e', 'davinci', 'embedding', 'tts', 'whisper')
 BASE_MODELS_CACHE_KEY = f'{REDIS_KEY_PREFIX}:models:base'
+NATIVE_KEY_REF_PREFIX = '__deepseek_saved__:'
 
 
 def _clean_proxy_headers(raw_headers) -> dict:
@@ -235,6 +239,26 @@ async def get_openai_runtime_config() -> tuple[bool, list[str], list[str], dict]
         values.get('openai.api_keys') or [],
         values.get('openai.api_configs') or {},
     )
+
+
+def _native_key_refs(urls: list[str], keys: list[str], configs: dict) -> dict[int, str]:
+    """Return opaque handles for saved native keys, stable when connections are reindexed."""
+    return {
+        index: NATIVE_KEY_REF_PREFIX + hmac.digest(WEBUI_SECRET_KEY.encode(), key.encode(), 'sha256').hex()
+        for index, (url, key) in enumerate(zip(urls, keys))
+        if key and configs.get(str(index), configs.get(url, {})).get('provider') == deepseek_native.PROVIDER
+    }
+
+
+def _mask_native_keys(config: dict) -> dict:
+    keys = config.get('OPENAI_API_KEYS') or []
+    refs = _native_key_refs(config.get('OPENAI_API_BASE_URLS') or [], keys, config.get('OPENAI_API_CONFIGS') or {})
+    return {**config, 'OPENAI_API_KEYS': [refs.get(index, key) for index, key in enumerate(keys)]}
+
+
+async def _saved_native_keys() -> dict[str, str]:
+    _, urls, keys, configs = await get_openai_runtime_config()
+    return {ref: keys[index] for index, ref in _native_key_refs(urls, keys, configs).items()}
 
 
 async def normalize_openai_api_keys(api_base_urls: list[str], api_keys: list[str]) -> list[str]:
@@ -435,6 +459,8 @@ async def get_anthropic_request_target(request: Request, form_data: dict, user: 
         raise HTTPException(status_code=404, detail=ERROR_MESSAGES.MODEL_NOT_FOUND())
 
     url, key, api_config = await get_openai_connection(model['urlIdx'])
+    if api_config.get('provider') == deepseek_native.PROVIDER:
+        raise HTTPException(400, 'Use /api/chat/completions for DeepSeek Native.')
     prefix_id = api_config.get('prefix_id')
     payload['model'] = strip_provider_model_prefix(payload['model'], prefix_id)
 
@@ -502,7 +528,7 @@ async def count_anthropic_tokens(request: Request, form_data: dict, user: UserMo
 
 @router.get('/config')
 async def get_config(request: Request, user=Depends(get_admin_user)):
-    return await get_openai_config()
+    return _mask_native_keys(await get_openai_config())
 
 
 class OpenAIConfigForm(BaseModel):
@@ -514,7 +540,7 @@ class OpenAIConfigForm(BaseModel):
 
 @router.post('/config/update')
 async def update_config(request: Request, form_data: OpenAIConfigForm, user=Depends(get_admin_user)):
-    api_keys = form_data.OPENAI_API_KEYS
+    api_keys = list(form_data.OPENAI_API_KEYS)
 
     if len(api_keys) > len(form_data.OPENAI_API_BASE_URLS):
         api_keys = api_keys[: len(form_data.OPENAI_API_BASE_URLS)]
@@ -523,6 +549,15 @@ async def update_config(request: Request, form_data: OpenAIConfigForm, user=Depe
 
     valid_keys = set(map(str, range(len(form_data.OPENAI_API_BASE_URLS))))
     api_configs = {key: value for key, value in form_data.OPENAI_API_CONFIGS.items() if key in valid_keys}
+    saved_keys = await _saved_native_keys() if any(key.startswith(NATIVE_KEY_REF_PREFIX) for key in api_keys) else {}
+    for index, (url, key) in enumerate(zip(form_data.OPENAI_API_BASE_URLS, api_keys)):
+        native = (api_configs.get(str(index)) or {}).get('provider') == deepseek_native.PROVIDER
+        if key.startswith(NATIVE_KEY_REF_PREFIX):
+            if not native or key not in saved_keys:
+                raise HTTPException(400, 'Reload the connection settings before updating the DeepSeek API key.')
+            api_keys[index] = key = saved_keys[key]
+        if native and (url.rstrip('/') != deepseek_native.BASE_URL or not key.strip()):
+            raise HTTPException(400, 'DeepSeek Native requires the official API URL and an API key.')
 
     await Config.upsert(
         {
@@ -548,12 +583,12 @@ async def update_config(request: Request, form_data: OpenAIConfigForm, user=Depe
         },
     )
 
-    return {
+    return _mask_native_keys({
         'ENABLE_OPENAI_API': form_data.ENABLE_OPENAI_API,
         'OPENAI_API_BASE_URLS': form_data.OPENAI_API_BASE_URLS,
         'OPENAI_API_KEYS': api_keys,
         'OPENAI_API_CONFIGS': api_configs,
-    }
+    })
 
 
 @router.post('/audio/speech')
@@ -645,6 +680,15 @@ async def get_all_models_responses(request: Request, user: UserModel) -> list:
 
     request_tasks = []
     for idx, url in enumerate(api_base_urls):
+        connection = api_configs.get(str(idx), api_configs.get(url, {}))
+        if connection.get('provider') == deepseek_native.PROVIDER:
+            response = (
+                deepseek_native.model_list()
+                if connection.get('enable', True) and url.rstrip('/') == deepseek_native.BASE_URL and api_keys[idx]
+                else None
+            )
+            request_tasks.append(asyncio.sleep(0, response))
+            continue
         if (str(idx) not in api_configs) and (url not in api_configs):  # Legacy support
             request_tasks.append(get_models_request(request, url, api_keys[idx], user=user))
         else:
@@ -839,6 +883,8 @@ async def get_models(request: Request, url_idx: int | None = None, user=Depends(
         models = await get_all_models(request, user=user)
     else:
         url, key, api_config = await get_openai_connection(url_idx)
+        if api_config.get('provider') == deepseek_native.PROVIDER:
+            return deepseek_native.model_list() if key and url.rstrip('/') == deepseek_native.BASE_URL else {'data': []}
 
         r = None
         async with aiohttp.ClientSession(
@@ -1034,6 +1080,24 @@ async def verify_connection(
     key = form_data.key
 
     api_config = form_data.config or {}
+    if api_config.get('provider') == deepseek_native.PROVIDER:
+        if key.startswith(NATIVE_KEY_REF_PREFIX):
+            key = (await _saved_native_keys()).get(key, '')
+        if url.rstrip('/') != deepseek_native.BASE_URL or not key.strip():
+            raise HTTPException(400, 'DeepSeek Native requires the official API URL and an API key.')
+        async with aiohttp.ClientSession(trust_env=True, timeout=_MODEL_LIST_TIMEOUT) as session:
+            try:
+                async with session.get(
+                    f'{deepseek_native.BASE_URL}/models',
+                    headers={'Authorization': f'Bearer {key}'},
+                    allow_redirects=False,
+                    ssl=AIOHTTP_CLIENT_SESSION_SSL,
+                ) as response:
+                    if response.status != 200:
+                        raise HTTPException(400, f'DeepSeek connection verification failed (HTTP {response.status}).')
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                raise HTTPException(502, 'Could not reach DeepSeek.') from exc
+        return deepseek_native.model_list()
 
     async with aiohttp.ClientSession(
         trust_env=True,
@@ -1527,10 +1591,29 @@ async def generate_chat_completion(
                 detail=ERROR_MESSAGES.MODEL_NOT_FOUND(),
             )
 
-        url, key, api_config = await get_openai_connection(idx)
+        try:
+            url, key, api_config = await get_openai_connection(idx)
+        except IndexError as exc:
+            raise HTTPException(404, detail=ERROR_MESSAGES.MODEL_NOT_FOUND()) from exc
 
     prefix_id = api_config.get('prefix_id', None)
     payload['model'] = strip_provider_model_prefix(payload['model'], prefix_id)
+
+    native = api_config.get('provider') == deepseek_native.PROVIDER
+    if native or model.get('provider') == deepseek_native.PROVIDER:
+        expected_id = f'{prefix_id}.{deepseek_native.MODEL_ID}' if prefix_id else deepseek_native.MODEL_ID
+        if (
+            not native
+            or model.get('provider') != deepseek_native.PROVIDER
+            or model_id != expected_id
+            or url.rstrip('/') != deepseek_native.BASE_URL
+            or not key
+            or not api_config.get('enable', True)
+        ):
+            raise HTTPException(503, 'The DeepSeek Native connection is unavailable.')
+        if 'access_grants' in api_config and not await has_connection_access(user, {'config': api_config}):
+            raise HTTPException(403, detail=ERROR_MESSAGES.ACCESS_PROHIBITED)
+        return await deepseek_native.generate(payload, key, user, form_data['model'])
 
     # Add user info to the payload if the model is a pipeline
     if 'pipeline' in model and model.get('pipeline'):
@@ -1898,6 +1981,9 @@ async def responses(
 
     url, key, api_config = await get_openai_connection(idx)
 
+    if api_config.get('provider') == deepseek_native.PROVIDER:
+        raise HTTPException(400, 'Use /api/chat/completions for DeepSeek Native.')
+
     payload['model'] = strip_provider_model_prefix(payload['model'], api_config.get('prefix_id'))
     body = JSONCodec.dumps(payload)
 
@@ -2018,6 +2104,8 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
 
     url, key, api_config = await get_openai_connection(idx)
     base_url = url
+    if api_config.get('provider') == deepseek_native.PROVIDER:
+        raise HTTPException(400, 'Use /api/chat/completions for DeepSeek Native.')
 
     r = None
     streaming = False

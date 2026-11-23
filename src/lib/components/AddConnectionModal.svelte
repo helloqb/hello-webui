@@ -32,6 +32,7 @@
 
 	let url = '';
 	let key = '';
+	let savedDeepSeekKey = '';
 	let auth_type = 'bearer';
 	let forwardCookies = false;
 
@@ -48,12 +49,15 @@
 	let tags = [];
 
 	let modelId = '';
-	let modelIds = [];
+	let modelIds: string[] = [];
 	let availableModelIds: string[] = [];
 
 	let loading = false;
 	let showDeleteConfirmDialog = false;
 	let showAdvanced = false;
+
+	const deepseekUrl = 'https://api.deepseek.com';
+	$: deepseekNative = !ollama && provider === 'deepseek_native';
 
 	const inputClass =
 		'bg-transparent outline-hidden placeholder:text-gray-300 dark:placeholder:text-gray-700';
@@ -104,12 +108,17 @@
 
 	const verifyOpenAIHandler = async () => {
 		availableModelIds = [];
+		const connectionKey = deepseekNative ? key.trim() || savedDeepSeekKey : key;
+		if (deepseekNative && !connectionKey) {
+			toast.error($i18n.t('Key is required'));
+			return;
+		}
 		// remove trailing slash from url
 		url = url.replace(/\/$/, '');
 
 		let _headers = null;
 
-		if (headers) {
+		if (!deepseekNative && headers) {
 			try {
 				_headers = JSON.parse(headers);
 				if (typeof _headers !== 'object' || Array.isArray(_headers)) {
@@ -124,17 +133,19 @@
 		}
 
 		const res = await verifyOpenAIConnection(localStorage.token, {
-			url,
-			key,
-			config: {
-				auth_type,
-				...(!ollama ? { forward_cookies: forwardCookies } : {}),
-				...(provider ? { provider } : {}),
-				...(azure ? { azure: true } : {}),
-				api_version: apiVersion,
-				passthrough_params: parsePassthroughParams(passthroughParams),
-				...(_headers ? { headers: _headers } : {})
-			}
+			url: deepseekNative ? deepseekUrl : url,
+			key: connectionKey,
+			config: deepseekNative
+				? { provider, auth_type: 'bearer' }
+				: {
+						auth_type,
+						...(!ollama ? { forward_cookies: forwardCookies } : {}),
+						...(provider ? { provider } : {}),
+						...(azure ? { azure: true } : {}),
+						api_version: apiVersion,
+						passthrough_params: parsePassthroughParams(passthroughParams),
+						...(_headers ? { headers: _headers } : {})
+					}
 		}).catch((error) => {
 			toast.error(`${error}`);
 		});
@@ -179,10 +190,17 @@
 
 	const submitHandler = async () => {
 		loading = true;
+		const connectionKey = deepseekNative ? key.trim() || savedDeepSeekKey : key;
 
-		if (!ollama && !url) {
+		if (!ollama && !deepseekNative && !url) {
 			loading = false;
 			toast.error($i18n.t('URL is required'));
+			return;
+		}
+
+		if (deepseekNative && !connectionKey) {
+			loading = false;
+			toast.error($i18n.t('Key is required'));
 			return;
 		}
 
@@ -210,7 +228,7 @@
 			}
 		}
 
-		if (headers) {
+		if (!deepseekNative && headers) {
 			try {
 				const _headers = JSON.parse(headers);
 				if (typeof _headers !== 'object' || Array.isArray(_headers)) {
@@ -227,33 +245,44 @@
 		// remove trailing slash from url
 		url = url.replace(/\/$/, '');
 
-		const connection = {
-			url,
-			key,
+		const submittedConnection = {
+			url: deepseekNative ? deepseekUrl : url,
+			key: connectionKey,
 			config: {
 				enable: enable,
 				tags: tags,
 				prefix_id: prefixId,
-				model_ids: modelIds,
-				connection_type: connectionType,
-				auth_type,
-				...(!ollama ? { forward_cookies: forwardCookies } : {}),
-				headers: headers ? JSON.parse(headers) : undefined,
-				passthrough_params: parsePassthroughParams(passthroughParams),
 				...(provider ? { provider } : {}),
-				...(!ollama && azure ? { azure: true } : {}),
-				...(azure ? { api_version: apiVersion } : {}),
-				...(apiType ? { api_type: apiType } : {})
+				...(deepseekNative
+					? {
+							connection_type: 'external',
+							auth_type: 'bearer',
+							...(connection?.config?.access_grants !== undefined
+								? { access_grants: connection.config.access_grants }
+								: {})
+						}
+					: {
+							model_ids: modelIds,
+							connection_type: connectionType,
+							auth_type,
+							...(!ollama ? { forward_cookies: forwardCookies } : {}),
+							headers: headers ? JSON.parse(headers) : undefined,
+							passthrough_params: parsePassthroughParams(passthroughParams),
+							...(!ollama && azure ? { azure: true } : {}),
+							...(azure ? { api_version: apiVersion } : {}),
+							...(apiType ? { api_type: apiType } : {})
+						})
 			}
 		};
 
-		await onSubmit(connection);
+		await onSubmit(submittedConnection);
 
 		loading = false;
 		show = false;
 
 		url = '';
 		key = '';
+		savedDeepSeekKey = '';
 		auth_type = 'bearer';
 		forwardCookies = false;
 		prefixId = '';
@@ -271,10 +300,11 @@
 
 	const init = () => {
 		availableModelIds = [];
+		savedDeepSeekKey = '';
 		forwardCookies = connection?.config?.forward_cookies ?? false;
 		if (connection) {
 			url = connection.url;
-			key = connection.key;
+			key = connection.key ?? '';
 
 			auth_type = connection.config.auth_type ?? 'bearer';
 			headers = connection.config?.headers
@@ -287,13 +317,17 @@
 			passthroughParams = Array.isArray(connection.config?.passthrough_params)
 				? connection.config.passthrough_params.join(', ')
 				: (connection.config?.passthrough_params ?? '');
-			modelIds = [...new Set(connection.config?.model_ids ?? [])];
+			modelIds = [...new Set<string>(connection.config?.model_ids ?? [])];
 
 			if (ollama) {
 				connectionType = connection.config?.connection_type ?? 'local';
 			} else {
 				connectionType = connection.config?.connection_type ?? 'external';
 				provider = connection.config?.provider ?? (connection.config?.azure ? 'azure' : '');
+				if (provider === 'deepseek_native' && key.startsWith('__deepseek_saved__:')) {
+					savedDeepSeekKey = key;
+					key = '';
+				}
 				apiVersion = connection.config?.api_version ?? '';
 				apiType = connection.config?.api_type ?? '';
 			}
@@ -350,6 +384,31 @@
 					}}
 				>
 					<div class="px-1">
+						{#if !ollama}
+							<div class="flex flex-row justify-between items-center w-full mb-2">
+								<label
+									for="provider-select"
+									class={`mb-0.5 text-xs text-gray-500
+							`}>{$i18n.t('Provider')}</label
+								>
+
+								<div>
+									<select
+										id="provider-select"
+										bind:value={provider}
+										class="text-xs text-gray-700 dark:text-gray-300 bg-transparent pr-5 outline-hidden"
+									>
+										<option value="">{$i18n.t('Default')}</option>
+										<option value="deepseek_native">{$i18n.t('DeepSeek Native')}</option>
+										<option value="azure">{$i18n.t('Azure OpenAI')}</option>
+										<option value="llama.cpp">{$i18n.t('llama.cpp')}</option>
+										<option value="lmstudio">{$i18n.t('LM Studio')}</option>
+										<option value="litellm">{$i18n.t('LiteLLM')}</option>
+									</select>
+								</div>
+							</div>
+						{/if}
+
 						<div class="flex gap-2">
 							<div class="flex w-full justify-between items-center">
 								<div class=" text-xs text-gray-500">{$i18n.t('Connection Type')}</div>
@@ -359,10 +418,11 @@
 										on:click={() => {
 											connectionType = connectionType === 'local' ? 'external' : 'local';
 										}}
+										disabled={deepseekNative}
 										type="button"
 										class=" text-xs text-gray-700 dark:text-gray-300"
 									>
-										{#if connectionType === 'local'}
+										{#if !deepseekNative && connectionType === 'local'}
 											{$i18n.t('Local')}
 										{:else}
 											{$i18n.t('External')}
@@ -385,10 +445,12 @@
 										id="url-input"
 										class={`w-full text-sm ${inputClass}`}
 										type="text"
-										bind:value={url}
+										value={deepseekNative ? deepseekUrl : url}
+										on:input={(e) => (url = e.currentTarget.value)}
+										readonly={deepseekNative}
 										placeholder={$i18n.t('API Base URL')}
 										autocomplete="off"
-										list={ollama ? undefined : 'suggestions'}
+										list={ollama || deepseekNative ? undefined : 'suggestions'}
 										required
 									/>
 
@@ -452,7 +514,9 @@
 										<select
 											id="select-bearer-or-session"
 											class={`w-full text-sm ${selectClass}`}
-											bind:value={auth_type}
+											value={deepseekNative ? 'bearer' : auth_type}
+											on:change={(e) => (auth_type = e.currentTarget.value)}
+											disabled={deepseekNative}
 										>
 											<option value="none">{$i18n.t('None')}</option>
 											<option value="bearer">{$i18n.t('Bearer')}</option>
@@ -466,11 +530,13 @@
 									</div>
 
 									<div class="flex flex-1 items-center">
-										{#if auth_type === 'bearer'}
+										{#if deepseekNative || auth_type === 'bearer'}
 											<SensitiveInput
 												bind:value={key}
-												placeholder={$i18n.t('API Key')}
-												required={false}
+												placeholder={deepseekNative && savedDeepSeekKey
+													? $i18n.t('API key saved')
+													: $i18n.t('API Key')}
+												required={deepseekNative && !savedDeepSeekKey}
 											/>
 										{:else if auth_type === 'none'}
 											<div class={`text-xs self-center translate-y-[1px] text-gray-500`}>
@@ -494,7 +560,7 @@
 							</div>
 						</div>
 
-						{#if !ollama}
+						{#if !ollama && !deepseekNative}
 							<div class="flex flex-row justify-between items-center w-full mt-1">
 								<label
 									for="api-type-toggle"
@@ -544,7 +610,7 @@
 						</div>
 
 						{#if showAdvanced}
-							{#if !ollama}
+							{#if !ollama && !deepseekNative}
 								<div class="flex items-center justify-between gap-3 mt-2">
 									<div>
 										<label for="forward-cookies" class="text-xs text-gray-500">
@@ -562,7 +628,7 @@
 								</div>
 							{/if}
 
-							<div class="flex gap-2 mt-2">
+							<div class={deepseekNative ? 'hidden' : 'flex gap-2 mt-2'}>
 								<div class="flex flex-col w-full">
 									<label
 										for="headers-input"
@@ -588,7 +654,7 @@
 								</div>
 							</div>
 
-							{#if !ollama}
+							{#if !ollama && !deepseekNative}
 								<div class="flex gap-2 mt-2">
 									<div class="flex flex-col w-full">
 										<label
@@ -644,30 +710,6 @@
 								</div>
 							</div>
 
-							{#if !ollama}
-								<div class="flex flex-row justify-between items-center w-full mt-2">
-									<label
-										for="provider-select"
-										class={`mb-0.5 text-xs text-gray-500
-								`}>{$i18n.t('Provider')}</label
-									>
-
-									<div>
-										<select
-											id="provider-select"
-											bind:value={provider}
-											class="text-xs text-gray-700 dark:text-gray-300 bg-transparent pr-5 outline-hidden"
-										>
-											<option value="">{$i18n.t('Default')}</option>
-											<option value="azure">{$i18n.t('Azure OpenAI')}</option>
-											<option value="llama.cpp">{$i18n.t('llama.cpp')}</option>
-											<option value="lmstudio">{$i18n.t('LM Studio')}</option>
-											<option value="litellm">{$i18n.t('LiteLLM')}</option>
-										</select>
-									</div>
-								</div>
-							{/if}
-
 							{#if azure}
 								<div class="flex gap-2 mt-2">
 									<div class="flex flex-col w-full">
@@ -692,7 +734,7 @@
 								</div>
 							{/if}
 
-							<div class="flex flex-col w-full mt-2">
+							<div class={deepseekNative ? 'hidden' : 'flex flex-col w-full mt-2'}>
 								<div class="mb-1 flex justify-between">
 									<div
 										class={`mb-0.5 text-xs text-gray-500
@@ -751,7 +793,7 @@
 								{/if}
 							</div>
 
-							<div class="flex items-center">
+							<div class={deepseekNative ? 'hidden' : 'flex items-center'}>
 								<label class="sr-only" for="add-model-id-input">{$i18n.t('Add a model ID')}</label>
 								<input
 									class={`w-full text-sm ${inputClass} ${modelId ? '' : 'text-gray-500'}`}

@@ -35,6 +35,7 @@
 	export let files = [];
 
 	export let selectedModels: string[] = [];
+	export let deepseekNativeOnly = false;
 	export let fileUploadCapableModels: string[] = [];
 	export let visionCapableModels: string[] = [];
 
@@ -69,13 +70,14 @@
 
 	let showAttachWebpageModal = false;
 	$: showAddContext =
-		$visibleControls['chat.attach_webpage'] ||
+		(!deepseekNativeOnly &&
+			($visibleControls['chat.attach_webpage'] ||
+				(($config?.features?.enable_notes ?? false) &&
+					($user?.role === 'admin' || ($user?.permissions?.features?.notes ?? true)) &&
+					$visibleControls['chat.attach_notes']) ||
+				$visibleControls['chat.attach_knowledge'] ||
+				$visibleControls['chat.reference_chats'])) ||
 		$visibleControls['chat.attach_files'] ||
-		(($config?.features?.enable_notes ?? false) &&
-			($user?.role === 'admin' || ($user?.permissions?.features?.notes ?? true)) &&
-			$visibleControls['chat.attach_notes']) ||
-		$visibleControls['chat.attach_knowledge'] ||
-		$visibleControls['chat.reference_chats'] ||
 		(fileUploadEnabled &&
 			($config?.features?.enable_google_drive_integration ||
 				($config?.features?.enable_onedrive_integration &&
@@ -110,7 +112,8 @@
 
 	let webUploadEnabled = true;
 	$: webUploadEnabled = $user?.role === 'admin' || ($user?.permissions?.chat?.web_upload ?? true);
-	$: toolPermissionsEnabled = $config?.features?.enable_tool_permissions ?? false;
+	$: toolPermissionsEnabled =
+		!deepseekNativeOnly && ($config?.features?.enable_tool_permissions ?? false);
 
 	$: if (!fileUploadEnabled && files.some((file) => file.type !== 'text')) {
 		files = files.filter((file) => file.type === 'text');
@@ -328,7 +331,7 @@
 						<div>{$i18n.t('Attachments')}</div>
 					</button>
 
-					{#if $visibleControls['chat.attach_webpage']}
+					{#if !deepseekNativeOnly && $visibleControls['chat.attach_webpage']}
 						<Tooltip
 							content={!webUploadEnabled
 								? $i18n.t('You do not have permission to upload web content.')
@@ -389,7 +392,7 @@
 						</Tooltip>
 					{/if}
 
-					{#if ($config?.features?.enable_notes ?? false) && ($user?.role === 'admin' || ($user?.permissions?.features?.notes ?? true)) && $visibleControls['chat.attach_notes']}
+					{#if !deepseekNativeOnly && ($config?.features?.enable_notes ?? false) && ($user?.role === 'admin' || ($user?.permissions?.features?.notes ?? true)) && $visibleControls['chat.attach_notes']}
 						<Tooltip
 							content={fileUploadCapableModels.length !== selectedModels.length
 								? $i18n.t('Model(s) do not support file upload')
@@ -424,7 +427,7 @@
 						</Tooltip>
 					{/if}
 
-					{#if $visibleControls['chat.attach_knowledge']}
+					{#if !deepseekNativeOnly && $visibleControls['chat.attach_knowledge']}
 						<Tooltip
 							content={fileUploadCapableModels.length !== selectedModels.length
 								? $i18n.t('Model(s) do not support file upload')
@@ -459,7 +462,7 @@
 						</Tooltip>
 					{/if}
 
-					{#if $visibleControls['chat.reference_chats']}
+					{#if !deepseekNativeOnly && $visibleControls['chat.reference_chats']}
 						<Tooltip
 							content={fileUploadCapableModels.length !== selectedModels.length
 								? $i18n.t('Model(s) do not support file upload')

@@ -104,6 +104,7 @@ from open_webui.utils.filter import (
     process_filter_functions,
 )
 from open_webui.utils.images.connections import get_requested_image_model
+from open_webui.utils.deepseek_native import PROVIDER as DEEPSEEK_NATIVE_PROVIDER
 from open_webui.utils.json_codec import JSONCodec, dumps_bytes
 from open_webui.utils.mcp.apps import MCPAppResult
 from open_webui.utils.memory import (
@@ -2070,6 +2071,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             metadata['selected_model_id'] = selected_model_id
 
     payload_tools = form_data.get('tools', None)  # snapshot before filters
+    deepseek_native = model.get('provider') == DEEPSEEK_NATIVE_PROVIDER
     form_data = apply_params_to_form_data(form_data, model)
     log.debug('form_data: %s', form_data)
 
@@ -2083,10 +2085,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     pending_assistant_message = None
     chat = await Chats.get_chat_by_id(chat_id) if is_saved_chat_id(chat_id) else None
     is_note_chat = bool(chat and (chat.meta or {}).get('internal') is True and (chat.meta or {}).get('type') == 'note')
-    use_builtin_tools = is_note_chat or (
-        bool(metadata.get('session_id'))
-        and metadata.get('params', {}).get('function_calling') != 'legacy'
-        and (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('builtin_tools', True)
+    use_builtin_tools = not deepseek_native and (
+        is_note_chat
+        or (
+            bool(metadata.get('session_id'))
+            and metadata.get('params', {}).get('function_calling') != 'legacy'
+            and (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('builtin_tools', True)
+        )
     )
     metadata['include_file_context'] = bool(
         chat and chat.user_id == user.id and payload_tools is None and use_builtin_tools
@@ -2103,7 +2108,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 if assistant_message and (assistant_message.get('content') or assistant_message.get('output')):
                     output = assistant_message.get('output') or []
                     if (
-                        metadata.get('tool_approval_resume') != 'model'
+                        not deepseek_native
+                        and metadata.get('tool_approval_resume') != 'model'
                         and not assistant_message.get('done', True)
                         and output
                         and output[-1].get('type') == 'message'
@@ -2136,7 +2142,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     for f in message.get('files', [])
                     if f.get('type') == 'image' or is_raster_image_content_type(f.get('content_type'))
                 ]
-                if message.get('role') == 'user' and image_files:
+                if not deepseek_native and message.get('role') == 'user' and image_files:
                     text_content = message.get('content', '')
                     if isinstance(text_content, str):
                         message['content'] = [
@@ -2153,6 +2159,26 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     if regeneration_prompt:
         form_data['messages'].append({'role': 'user', 'content': regeneration_prompt})
+
+    if deepseek_native:
+        # Native replies are provider-shaped and must not go through history compaction,
+        # tool-call conversion, RAG, or the inlet/request filter pipeline.
+        metadata['deepseek_native'] = True
+        if metadata.get('assistant_message_id'):
+            raise HTTPException(400, 'Regenerate the reply to restart DeepSeek Native generation.')
+        form_data['features'] = features = {
+            name: (metadata.get('features') or {}).get(name) is True
+            for name in ('deepseek_search', 'deepseek_thinking', 'memory')
+        }
+        metadata['features'] = features
+        form_data['metadata'] = metadata
+        system_message = get_system_message(form_data.get('messages', []))
+        if system_message:
+            system = get_content_from_message(system_message)
+            form_data = await apply_system_prompt_to_body(system, form_data, metadata, user, replace=True)
+        if await memory_context_enabled(user, features):
+            form_data = await add_memory_context(request, form_data, user, model)
+        return form_data, metadata, [], False
 
     filter_functions = (
         await get_filter_functions(request, model, metadata.get('filter_ids', [])) if ENABLE_FUNCTIONS else []
@@ -3880,6 +3906,8 @@ async def outlet_filter_handler(ctx):
     user = ctx['user']
     model = ctx['model']
     metadata = ctx['metadata']
+    if metadata.get('deepseek_native'):
+        return
     event_emitter = ctx.get('event_emitter')
     event_caller = ctx.get('event_caller')
 
@@ -4211,6 +4239,7 @@ async def non_streaming_chat_response_handler(response, ctx):
                                 'meta': {'response_ended_at': time.time()},
                                 'role': 'assistant',
                                 'output': response_output,
+                                **({'sources': response_data['sources']} if metadata.get('deepseek_native') and response_data.get('sources') else {}),
                                 **({'usage': usage} if usage else {}),
                             },
                         )
@@ -4284,7 +4313,9 @@ async def streaming_chat_response_handler(response, ctx):
     }
 
     filter_functions = (
-        await get_filter_functions(request, model, metadata.get('filter_ids', [])) if ENABLE_FUNCTIONS else []
+        await get_filter_functions(request, model, metadata.get('filter_ids', []))
+        if ENABLE_FUNCTIONS and not metadata.get('deepseek_native')
+        else []
     )
 
     # Standard streaming response handler
