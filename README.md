@@ -6,10 +6,10 @@
 
 GitHub Actions 根据 `native-上游主版本.次版本.补丁版本.自定义序号` 标签构建普通 CPU 镜像，并推送到 `ghcr.io/helloqb/hello-webui`。工作流使用 GitHub 提供的 `GITHUB_TOKEN`。Fork 的日常推送仍可运行检查，Open WebUI 官方发布任务只在上游仓库执行。 [发布工作流](.github/workflows/native-image.yaml) · [GitHub 容器镜像发布文档](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images)
 
-发布前在迷你主机上执行 `uname -m`。`x86_64` 使用默认的 `linux/amd64`。如果目标主机是 `aarch64`，在打标签前按需设置仓库变量：
+发布前在迷你主机上执行 `uname -m`。`x86_64` 使用默认的 `linux/amd64`。如果目标主机是 `aarch64`，请在打标签前设置仓库变量。
 
 ```sh
-gh variable set NATIVE_IMAGE_PLATFORM --body linux/arm64
+gh variable set NATIVE_IMAGE_PLATFORM --repo helloqb/hello-webui --body linux/arm64
 ```
 
 确认工作区改动已提交且对应版本通过验收，再从仓库根目录发布。以下标签是首个发布版本的示例。后续发布使用新的自定义序号。
@@ -18,8 +18,8 @@ gh variable set NATIVE_IMAGE_PLATFORM --body linux/arm64
 git push origin main
 git tag -a native-0.13.4.1 -m 'hello-webui 0.13.4 native.1'
 git push origin refs/tags/native-0.13.4.1
-gh run list --workflow native-image.yaml --event push --limit 5
-gh run watch
+gh run list --repo helloqb/hello-webui --workflow native-image.yaml --event push --limit 5
+gh run watch --repo helloqb/hello-webui
 ```
 
 工作流成功后，镜像标签为 `ghcr.io/helloqb/hello-webui:native-0.13.4.1`，镜像摘要可在该次运行的摘要中查看。手工构建也可使用仓库的 `Dockerfile`，本地 `.webui_secret_key` 和部署目录已从构建上下文排除。
